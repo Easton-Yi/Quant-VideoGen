@@ -1,3 +1,28 @@
+## Recent Changes: Self-Forcing Mixed-bit KV Cache Quantization
+
+This version adds configurable mixed-bit KV cache quantization to the Self-Forcing experiment path. The goal is to compare the original all-2-bit QVG baseline against a mixed setting where a fixed portion of KV cache frame chunks is quantized with 1-bit and the remaining chunks are quantized with 2-bit.
+
+Main changes:
+
+- Added the Triton PRQ `int1` quantization type: `triton-nstages-kmeans-int1`.
+- Implemented 1-bit residual pack / unpack / dequantization support.
+- Added mixed-bit configuration to `scripts/Self-Forcing/run_qvg.sh`:
+  - `mixed_bit_enabled`
+  - `mixed_schedule`
+  - `mixed_1bit_ratio`
+  - `mixed_low_quant_type`
+  - `mixed_high_quant_type`
+- The default schedule is `static_global`: the global 1-bit / 2-bit boundary is computed once before inference from the fixed video length and `mixed_1bit_ratio`.
+- During Self-Forcing inference, each KV cache span is checked against the global boundary before compression:
+  - spans before the boundary use `triton-nstages-kmeans-int1`
+  - spans after the boundary use `triton-nstages-kmeans-int2`
+  - spans crossing the boundary are split into separate 1-bit and 2-bit spans
+- Each quantized KV span stores its own `quant_config`, so cache reads can dequantize mixed int1/int2 spans with the correct bit width.
+
+The current mixed-bit scheduling implementation is wired into the Self-Forcing path only. LongCat and HY-WorldPlay have not been connected to the mixed-bit scheduler yet. With the default script values `num_output_frames=180` and `mixed_1bit_ratio=0.25`, the first 45 frame chunks use 1-bit quantization and the remaining 135 frame chunks use 2-bit quantization.
+
+---------------
+
 <div align="center">
 
 # QuantVideoGen
