@@ -34,7 +34,7 @@ def prq_quant(
         n_clusters: Number of clusters for each KMeans stage.
         block_size: Block size for final residual quantization.
         num_bits: Number of bits for quantization.
-            - Must be 2, 3, 4, or 8.
+            - Must be 1, 2, 3, 4, or 8.
         scale_precision: Precision for scale factors.
             - Must be torch.bfloat16 or torch.float8_e4m3fn.
         max_iters: Max iterations for each KMeans.
@@ -120,7 +120,7 @@ def prq_dequant(
         residual_quant: Quantized residual tensor from prq_quant.
         scales: Scale factors from quantization, shape (B, H, S, D // block_size).
         block_size: Block size used in quantization.
-        num_bits: Number of bits used in quantization (2, 4, or 8).
+        num_bits: Number of bits used in quantization (1, 2, 4, or 8).
         PACK_INPUT_INT8: If True, residual is packed into uint8.
 
     Returns:

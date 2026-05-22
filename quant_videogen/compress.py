@@ -104,7 +104,14 @@ def get_quantize_fn(quant_type: str, quant_config: QuantizeConfig):
                 use_percentile_clipping=True,
                 percentile=99.0,
             )
-    elif quant_type in ["triton-nstages-kmeans-int2", "triton-nstages-kmeans-int2-clip", "triton-nstages-kmeans-int4", "triton-nstages-kmeans-int4-clip"]:
+    elif quant_type in [
+        "triton-nstages-kmeans-int1",
+        "triton-nstages-kmeans-int1-clip",
+        "triton-nstages-kmeans-int2",
+        "triton-nstages-kmeans-int2-clip",
+        "triton-nstages-kmeans-int4",
+        "triton-nstages-kmeans-int4-clip",
+    ]:
         """Do not quantize here"""
         def quantize_fn(x):
             m = re.search(r'int(\d+)', quant_config.quant_type)
@@ -153,11 +160,13 @@ def get_quantize_type(quant_type: str):
     ]:
         quantize_type = QuantizeFunctions.NSTAGE_KMEANS_CLIP
     elif quant_type in [
+        "triton-nstages-kmeans-int1",
         "triton-nstages-kmeans-int2",
         "triton-nstages-kmeans-int4",
     ]:
         quantize_type = QuantizeFunctions.TRITON_PRQ
     elif quant_type in [
+        "triton-nstages-kmeans-int1-clip",
         "triton-nstages-kmeans-int2-clip",
         "triton-nstages-kmeans-int4-clip",
     ]:

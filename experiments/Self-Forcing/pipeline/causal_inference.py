@@ -55,6 +55,8 @@ class CausalInferencePipeline(torch.nn.Module):
             
         # Quant Config using SimpleNamespace
         self.quant_config = SimpleNamespace(**args.quant_config)
+        self.mixed_final_num_chunks = None
+        self.mixed_1bit_boundary_chunk = None
 
         self.generator.model.kv_cache_cpu_offload = getattr(self.quant_config, "kv_cache_cpu_offload", False)
 
@@ -84,44 +86,28 @@ class CausalInferencePipeline(torch.nn.Module):
             return
 
         cprint(f"Quantizing kv cache with config:\n{self.quant_config}", "light_blue")
+        quant_spans = self._get_quantization_spans(
+            tokens_to_quantize_start,
+            tokens_to_quantize_end,
+        )
 
         do_offload = getattr(self.quant_config, "kv_cache_cpu_offload", False)
         cuda_device = torch.device("cuda")
 
         with torch.no_grad():
-            quantize_fn = get_quantize_fn(self.quant_config.quant_type, self.quant_config)
-
             for layer_idx, layer in enumerate(self.kv_cache1):
                 if do_offload:
                     onload_kv_cache_layer(layer, cuda_device)
 
-                # Read the span to quantize — always full precision [B, S, H, D]
-                k = layer["k"].read(tokens_to_quantize_start, tokens_to_quantize_end)
-                v = layer["v"].read(tokens_to_quantize_start, tokens_to_quantize_end)
-
-                # compress_kv_cache expects [B, H, S, D]
-                k = k.permute(0, 2, 1, 3).contiguous()
-                v = v.permute(0, 2, 1, 3).contiguous()
-
-                k_quant, v_quant = compress_kv_cache(
-                    k, v, self.quant_config.quant_type, self.quant_config, quantize_fn
-                )
-
-                self._print_kv_cache_mse_error(k, k_quant, v, v_quant, layer_idx)
-
-                # Pack decompression metadata for real-quantized dicts
-                if isinstance(k_quant, dict) and isinstance(v_quant, dict):
-                    k_quant, v_quant = self._pack_info_into_kv_cache(
-                        k_quant, v_quant, k.dtype
+                # Quantize each configured span independently.
+                for span_start, span_end, span_quant_config in quant_spans:
+                    self._quantize_kv_cache_span(
+                        layer,
+                        layer_idx,
+                        span_start,
+                        span_end,
+                        span_quant_config,
                     )
-
-                # store_quantized handles both tensor (fake) and dict (real)
-                layer["k"].store_quantized(
-                    tokens_to_quantize_start, tokens_to_quantize_end, k_quant
-                )
-                layer["v"].store_quantized(
-                    tokens_to_quantize_start, tokens_to_quantize_end, v_quant
-                )
 
                 if do_offload:
                     offload_kv_cache_layer(layer)
@@ -132,6 +118,137 @@ class CausalInferencePipeline(torch.nn.Module):
         cprint(f"Quantization KV Cache Time: {(duration / 1000):.2f} s", "light_cyan")
 
         self._print_memory_usage(self.kv_cache1)
+
+    def _get_quantization_spans(self, start_index: int, end_index: int):
+        """Return frame-aligned quantization spans and their per-span configs."""
+        mixed_enabled = getattr(self.quant_config, "mixed_bit_enabled", False)
+        if not mixed_enabled:
+            return [(start_index, end_index, self.quant_config)]
+
+        num_tokens = end_index - start_index
+        assert num_tokens % self.frame_seq_length == 0, (
+            f"Quantization range length {num_tokens} must be frame-aligned "
+            f"to frame_seq_length {self.frame_seq_length}"
+        )
+
+        schedule = getattr(self.quant_config, "mixed_schedule", "static_global")
+        if schedule != "static_global":
+            raise ValueError(f"Unsupported mixed-bit schedule: {schedule}")
+
+        if self.mixed_1bit_boundary_chunk is None:
+            raise RuntimeError("Mixed-bit static boundary has not been configured")
+
+        ratio = float(getattr(self.quant_config, "mixed_1bit_ratio", 0.0))
+        low_quant_type = getattr(
+            self.quant_config,
+            "mixed_low_quant_type",
+            "triton-nstages-kmeans-int1",
+        )
+        high_quant_type = getattr(
+            self.quant_config,
+            "mixed_high_quant_type",
+            "triton-nstages-kmeans-int2",
+        )
+
+        spans = []
+        boundary_index = self.mixed_1bit_boundary_chunk * self.frame_seq_length
+        if start_index < boundary_index:
+            one_bit_end = min(end_index, boundary_index)
+            spans.append((
+                start_index,
+                one_bit_end,
+                self._make_span_quant_config(low_quant_type),
+            ))
+        if boundary_index < end_index:
+            two_bit_start = max(start_index, boundary_index)
+            spans.append((
+                two_bit_start,
+                end_index,
+                self._make_span_quant_config(high_quant_type),
+            ))
+
+        span_desc = ", ".join(
+            f"[{span_start}, {span_end}) -> {span_config.quant_type}"
+            for span_start, span_end, span_config in spans
+        )
+        cprint(
+            f"Mixed-bit KV spans: {span_desc} "
+            f"(schedule={schedule}, 1-bit ratio target={ratio:.2f}, "
+            f"boundary chunk={self.mixed_1bit_boundary_chunk}/"
+            f"{self.mixed_final_num_chunks})",
+            "light_cyan",
+        )
+        return spans
+
+    def _configure_mixed_bit_schedule(self, final_num_chunks: int):
+        if not getattr(self.quant_config, "mixed_bit_enabled", False):
+            self.mixed_final_num_chunks = None
+            self.mixed_1bit_boundary_chunk = None
+            return
+
+        schedule = getattr(self.quant_config, "mixed_schedule", "static_global")
+        if schedule != "static_global":
+            raise ValueError(f"Unsupported mixed-bit schedule: {schedule}")
+
+        ratio = float(getattr(self.quant_config, "mixed_1bit_ratio", 0.0))
+        ratio = max(0.0, min(1.0, ratio))
+        self.mixed_final_num_chunks = final_num_chunks
+        self.mixed_1bit_boundary_chunk = int(final_num_chunks * ratio)
+        self.mixed_1bit_boundary_chunk = max(
+            0,
+            min(final_num_chunks, self.mixed_1bit_boundary_chunk),
+        )
+
+        cprint(
+            "Mixed-bit schedule: static_global | "
+            f"Final chunks: {self.mixed_final_num_chunks} | "
+            f"1-bit boundary chunk: {self.mixed_1bit_boundary_chunk} | "
+            f"1-bit range: [0, {self.mixed_1bit_boundary_chunk}) | "
+            f"2-bit range: [{self.mixed_1bit_boundary_chunk}, {self.mixed_final_num_chunks})",
+            "light_cyan",
+        )
+
+    def _make_span_quant_config(self, quant_type: str):
+        quant_config_dict = vars(self.quant_config).copy()
+        quant_config_dict["quant_type"] = quant_type
+        return SimpleNamespace(**quant_config_dict)
+
+    def _quantize_kv_cache_span(
+        self,
+        layer: dict,
+        layer_idx: int,
+        start_index: int,
+        end_index: int,
+        quant_config: SimpleNamespace,
+    ):
+        if start_index >= end_index:
+            return
+
+        quantize_fn = get_quantize_fn(quant_config.quant_type, quant_config)
+
+        # Read the span to quantize - always full precision [B, S, H, D]
+        k = layer["k"].read(start_index, end_index)
+        v = layer["v"].read(start_index, end_index)
+
+        # compress_kv_cache expects [B, H, S, D]
+        k = k.permute(0, 2, 1, 3).contiguous()
+        v = v.permute(0, 2, 1, 3).contiguous()
+
+        k_quant, v_quant = compress_kv_cache(
+            k, v, quant_config.quant_type, quant_config, quantize_fn
+        )
+
+        self._print_kv_cache_mse_error(k, k_quant, v, v_quant, layer_idx)
+
+        # Pack decompression metadata for real-quantized dicts
+        if isinstance(k_quant, dict) and isinstance(v_quant, dict):
+            k_quant, v_quant = self._pack_info_into_kv_cache(
+                k_quant, v_quant, k.dtype, quant_config
+            )
+
+        # store_quantized handles both tensor (fake) and dict (real)
+        layer["k"].store_quantized(start_index, end_index, k_quant)
+        layer["v"].store_quantized(start_index, end_index, v_quant)
 
     
     def _print_kv_cache_mse_error(self, k, k_quant, v, v_quant, layer_idx):
@@ -171,16 +288,17 @@ class CausalInferencePipeline(torch.nn.Module):
             "light_blue",
         )
 
-    def _pack_info_into_kv_cache(self, k_cache, v_cache, output_dtype):
+    def _pack_info_into_kv_cache(self, k_cache, v_cache, output_dtype, quant_config=None):
         """Pack metadata into KV cache. Only when the cached value is a real quantized dict."""
+        quant_config = self.quant_config if quant_config is None else quant_config
         if isinstance(k_cache, dict) and isinstance(v_cache, dict):
             k_cache["info"] = {
                 "output_dtype": output_dtype,
-                "quant_config": self.quant_config,
+                "quant_config": quant_config,
             }
             v_cache["info"] = {
                 "output_dtype": output_dtype,
-                "quant_config": self.quant_config,
+                "quant_config": quant_config,
             }
         return k_cache, v_cache
     
@@ -222,6 +340,7 @@ class CausalInferencePipeline(torch.nn.Module):
             num_blocks = (num_frames - 1) // self.num_frame_per_block
         num_input_frames = initial_latent.shape[1] if initial_latent is not None else 0
         num_output_frames = num_frames + num_input_frames  # add the initial latent frames
+        self._configure_mixed_bit_schedule(final_num_chunks=num_output_frames)
         conditional_dict = self.text_encoder(
             text_prompts=text_prompts
         )

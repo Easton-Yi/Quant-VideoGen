@@ -67,18 +67,25 @@ def _quant_pack_kernel(
     abs_x = tl.abs(x)
     max_x = tl.max(abs_x, axis=1, keep_dims=True)
 
-    max_int_value = 2**(n_bits - 1) - 1
-    scale_x = max_x / max_int_value
-    scale_x = tl.maximum(scale_x, 1e-10)
-    
+    if n_bits == 1:
+        # Sign-only binary quantization.  Use a blockwise mean-abs scale so
+        # dequantization maps each value to {-scale, +scale}.
+        scale_x = tl.sum(abs_x, axis=1, keep_dims=True) / Q_BLOCK_SIZE
+        scale_x = tl.maximum(scale_x, 1e-10)
+        y = tl.where(x >= 0.0, 1, -1)
+    else:
+        max_int_value = 2**(n_bits - 1) - 1
+        scale_x = max_x / max_int_value
+        scale_x = tl.maximum(scale_x, 1e-10)
+
+        # Float Quantization
+        y = x / scale_x
+        y = libdevice.round(y)
+        y = tl.clamp(y, min=-max_int_value, max=max_int_value)
+
     # If the scaling factor is also being quantized to E4M3
     if SCALE_IS_E4M3:
         scale_x = scale_x.to(tl.float8e4nv)
-    
-    # Float Quantization
-    y = x / scale_x
-    y = libdevice.round(y)
-    y = tl.clamp(y, min=-max_int_value, max=max_int_value)
     
     # Deal with output shape
     y = tl.reshape(y, (BLOCK_D))
@@ -105,6 +112,36 @@ def _quant_pack_kernel(
             y1, y3 = tl.split(y13)
             y2, y4 = tl.split(y24)
             y_new = y1 << 6 | y2 << 4 | y3 << 2 | y4
+            y = y_new
+        elif n_bits == 1:
+            y = tl.where(y > 0, 1, 0)
+            y = tl.reshape(y, (BLOCK_D // 2, 2))
+            y_even, y_odd = tl.split(y)
+
+            y_even = tl.reshape(y_even, (BLOCK_D // 4, 2))
+            y_odd = tl.reshape(y_odd, (BLOCK_D // 4, 2))
+            y04, y26 = tl.split(y_even)
+            y15, y37 = tl.split(y_odd)
+
+            y04 = tl.reshape(y04, (BLOCK_D // 8, 2))
+            y26 = tl.reshape(y26, (BLOCK_D // 8, 2))
+            y15 = tl.reshape(y15, (BLOCK_D // 8, 2))
+            y37 = tl.reshape(y37, (BLOCK_D // 8, 2))
+            y0, y4 = tl.split(y04)
+            y2, y6 = tl.split(y26)
+            y1, y5 = tl.split(y15)
+            y3, y7 = tl.split(y37)
+
+            y_new = (
+                y0 << 7
+                | y1 << 6
+                | y2 << 5
+                | y3 << 4
+                | y4 << 3
+                | y5 << 2
+                | y6 << 1
+                | y7
+            )
             y = y_new
             
     y = y.to(Y_ptr.dtype.element_ty)
@@ -138,16 +175,16 @@ def quant_pack(
         block_size: The size of each block for quantization.
         num_bits: The number of bits for quantization.
         scale_precision: The dtype for storing scale factors. Must be bfloat16 or float8_e4m3fn.
-        pack_output_int8: If True, pack the output into int8. In this case, num_bits must be 2 or 4.
+        pack_output_int8: If True, pack the output into int8. In this case, num_bits must be 1, 2, or 4.
         
     Returns:
         x_quant: Quantized tensor.
         scales: Scale factors with dtype `scale_precision`, shape (..., D // block_size).
     """
-    assert num_bits in (2, 3, 4, 8), "num_bits must be 2, 3, 4, or 8"
+    assert num_bits in (1, 2, 3, 4, 8), "num_bits must be 1, 2, 3, 4, or 8"
     assert scale_precision in (torch.bfloat16, torch.float8_e4m3fn), "scale_precision must be bfloat16 or float8_e4m3fn"
     if pack_output_int8:
-        assert num_bits in (2, 4), "num_bits must be 2 or 4 when pack_output_int8 is True"
+        assert num_bits in (1, 2, 4), "num_bits must be 1, 2 or 4 when pack_output_int8 is True"
     
     B, H, S, D = x.shape
     SCALE_D = D // block_size
@@ -156,7 +193,7 @@ def quant_pack(
     HSCALE_D = H * SCALE_D
     
     SCALE_IS_E4M3 = scale_precision == torch.float8_e4m3fn
-    PACK_OUTPUT_INT8 = pack_output_int8 and num_bits in (2, 4)
+    PACK_OUTPUT_INT8 = pack_output_int8 and num_bits in (1, 2, 4)
     
     # First, reshape to (B * S, H * D) while keeping the original shape
     x = x.permute(0, 2, 1, 3).reshape(B * S, H * D).contiguous()
@@ -164,6 +201,7 @@ def quant_pack(
     # Define Outputs
     if PACK_OUTPUT_INT8:
         elem_per_int = 8 // num_bits
+        assert HD % elem_per_int == 0, "H * D must be divisible by the number of packed elements per uint8"
         HD_AFTER_PACK = HD // elem_per_int
         y = torch.zeros(B * S, HD // elem_per_int, device=x.device, dtype=torch.uint8)
     else:

@@ -24,6 +24,8 @@ class ChunkedKVCache:
       ``torch.empty`` on first write.
     * Real-quantized spans (dicts from ``compress_kv_cache``) can cover
       multiple contiguous chunks and are stored as a single compressed object.
+      Each span carries its own ``info.quant_config``, so mixed-bit spans can
+      coexist in one cache.
     * ``read()`` returns a full-precision tensor in the configured *layout*,
       decompressing quantized spans on the fly.
 
@@ -168,7 +170,8 @@ class ChunkedKVCache:
 
             elif state == ChunkState.QUANTIZED:
                 span = self._find_span(ci)
-                # uncompress always returns BHSD [B, H, S, D]
+                # Each quantized span carries its own quant_config in "info".
+                # uncompress always returns BHSD [B, H, S, D].
                 dec, _ = uncompress_kv_cache(span["quant_data"], span["quant_data"])
                 if self.layout == "BSHD":
                     dec = dec.permute(0, 2, 1, 3).contiguous()
@@ -207,6 +210,11 @@ class ChunkedKVCache:
         if isinstance(quant_data, torch.Tensor):
             self.write(start_index, end_index, quant_data)
         else:
+            info = quant_data.get("info") if isinstance(quant_data, dict) else None
+            assert info is not None and "quant_config" in info and "output_dtype" in info, (
+                "Real quantized cache data must contain info.quant_config "
+                "and info.output_dtype"
+            )
             self._remove_overlapping_spans(sc, ec)
             for ci in range(sc, ec):
                 self.chunks[ci] = None

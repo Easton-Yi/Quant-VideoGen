@@ -281,7 +281,7 @@ def triton_prq_quantize_tensor(
         num_stages: Number of K-Means stages
         num_clusters: Number of centroids per stage
         block_size: Block size for residual quantization
-        num_bits: Number of bits for residual quantization (2 or 4)
+        num_bits: Number of bits for residual quantization (1, 2, or 4)
         max_iters: Maximum iterations for K-Means
         scale_precision: Precision for scale factors
         use_percentile_clipping: If True, apply percentile clipping before quantization
@@ -299,7 +299,9 @@ def triton_prq_quantize_tensor(
             - num_bits: Number of bits used
     """
     num_bits = quantize_fn(tensor)
-    if num_bits == 2:
+    if num_bits == 1:
+        TARGET_MAX = 448 * 1
+    elif num_bits == 2:
         TARGET_MAX = 448 * 1
     elif num_bits == 4:
         TARGET_MAX = 448 * 7
@@ -378,7 +380,7 @@ def triton_prq_dequantize_tensor(
             - scale_factor (optional): If use_percentile_clipping was used
             - use_percentile_clipping (optional): bool
         block_size: Block size used in quantization.
-        num_bits: Number of bits (2 or 4) used in quantization.
+        num_bits: Number of bits (1, 2, or 4) used in quantization.
         output_dtype: Dtype of the reconstructed tensor.
 
     Returns:

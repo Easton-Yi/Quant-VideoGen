@@ -19,6 +19,18 @@ from utils.misc import set_seed
 
 from demo_utils.memory import gpu, get_cuda_free_memory_gb, DynamicSwapInstaller
 
+
+def str2bool(value):
+    if isinstance(value, bool):
+        return value
+    value = value.lower()
+    if value in ("true", "1", "yes", "y"):
+        return True
+    if value in ("false", "0", "no", "n"):
+        return False
+    raise argparse.ArgumentTypeError(f"Expected a boolean value, got {value}")
+
+
 parser = argparse.ArgumentParser()
 parser.add_argument("--config_path", type=str, help="Path to the config file")
 parser.add_argument("--checkpoint_path", type=str, help="Path to the checkpoint folder")
@@ -46,6 +58,11 @@ parser.add_argument("--cache_num_v_centroids", type=int, default=256, help="Numb
 parser.add_argument("--kmeans_max_iters", type=int, default=100, help="Maximum iterations for K-Means clustering")
 parser.add_argument("--quant_block_size", type=int, default=16, help="Block size for quantization")
 parser.add_argument("--num_prq_stages", type=int, default=1, help="Number of PRQ stages for nstages-kmeans quantization")
+parser.add_argument("--mixed_bit_enabled", type=str2bool, default=False, help="Whether to use mixed-bit KV cache quantization")
+parser.add_argument("--mixed_schedule", type=str, default="static_global", help="Mixed-bit scheduling policy")
+parser.add_argument("--mixed_1bit_ratio", type=float, default=0.0, help="Ratio of KV blocks to quantize with 1-bit")
+parser.add_argument("--mixed_low_quant_type", type=str, default="triton-nstages-kmeans-int1", help="Quantization type for the low-bit mixed span")
+parser.add_argument("--mixed_high_quant_type", type=str, default="triton-nstages-kmeans-int2", help="Quantization type for the remaining mixed span")
 args = parser.parse_args()
 
 # Initialize distributed inference
@@ -79,7 +96,12 @@ config.quant_config = {
     "cache_num_v_centroids": args.cache_num_v_centroids,
     "kmeans_max_iters": args.kmeans_max_iters,
     "quant_block_size": args.quant_block_size,
-    "num_prq_stages": args.num_prq_stages
+    "num_prq_stages": args.num_prq_stages,
+    "mixed_bit_enabled": args.mixed_bit_enabled,
+    "mixed_schedule": args.mixed_schedule,
+    "mixed_1bit_ratio": args.mixed_1bit_ratio,
+    "mixed_low_quant_type": args.mixed_low_quant_type,
+    "mixed_high_quant_type": args.mixed_high_quant_type,
 }
 
 # ------------------------------------------------------------------

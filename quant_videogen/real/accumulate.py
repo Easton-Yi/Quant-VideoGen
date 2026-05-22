@@ -83,7 +83,26 @@ def _nstage_accum_kernel(
         
         
         # Unpack based on n_bits
-        if n_bits == 4:
+        if n_bits == 1:
+            b0 = (residual_packed >> 7) & 0x1
+            b1 = (residual_packed >> 6) & 0x1
+            b2 = (residual_packed >> 5) & 0x1
+            b3 = (residual_packed >> 4) & 0x1
+            b4 = (residual_packed >> 3) & 0x1
+            b5 = (residual_packed >> 2) & 0x1
+            b6 = (residual_packed >> 1) & 0x1
+            b7 = residual_packed & 0x1
+
+            b04 = tl.reshape(tl.join(b0, b4), (BLOCK_S, D // 4))
+            b26 = tl.reshape(tl.join(b2, b6), (BLOCK_S, D // 4))
+            b15 = tl.reshape(tl.join(b1, b5), (BLOCK_S, D // 4))
+            b37 = tl.reshape(tl.join(b3, b7), (BLOCK_S, D // 4))
+
+            even = tl.reshape(tl.join(b04, b26), (BLOCK_S, D // 2))
+            odd = tl.reshape(tl.join(b15, b37), (BLOCK_S, D // 2))
+            residual_unpacked = tl.reshape(tl.join(even, odd), (BLOCK_S, D))
+            residual_unpacked = residual_unpacked * 2 - 1
+        elif n_bits == 4:
             # Packing: y1 << 4 | y2, y1=even, y2=odd
             high = (residual_packed >> 4) & 0xF
             low = residual_packed & 0xF
@@ -183,7 +202,7 @@ def nstage_accum(
                         If PACK_INPUT_INT8=False: shape (B, H, S, D) as int8.
         scales: Scale factors from quantization, shape (B, H, S, D // block_size).
         block_size: Block size used in quantization.
-        num_bits: Number of bits used in quantization (2, 4, or 8).
+        num_bits: Number of bits used in quantization (1, 2, 4, or 8).
         PACK_INPUT_INT8: If True, residual is packed into uint8 (multiple values per byte).
                          If False, residual is stored as int8 (one value per byte).
 
@@ -191,10 +210,10 @@ def nstage_accum(
         x_reconstructed: Tensor of shape (B, H, S, D), the reconstructed tensor.
                          x_reconstructed ≈ sum(centroids[stage][cluster_ids[stage]]) + dequant(residual)
     """
-    assert num_bits in (2, 4, 8), "num_bits must be 2, 4, or 8"
+    assert num_bits in (1, 2, 4, 8), "num_bits must be 1, 2, 4, or 8"
     assert len(centroids_list) == len(cluster_ids_list), "centroids_list and cluster_ids_list must have same length"
     if PACK_INPUT_INT8:
-        assert num_bits in (2, 4), "PACK_INPUT_INT8=True requires num_bits in (2, 4)"
+        assert num_bits in (1, 2, 4), "PACK_INPUT_INT8=True requires num_bits in (1, 2, 4)"
 
     N_STAGES = len(centroids_list)
     B, H, K, D = centroids_list[0].shape
@@ -202,7 +221,7 @@ def nstage_accum(
     BH = B * H
     
     # Determine pack factor and D_PACKED
-    if PACK_INPUT_INT8 and num_bits in (2, 4):
+    if PACK_INPUT_INT8 and num_bits in (1, 2, 4):
         pack_factor = 8 // num_bits
         D_PACKED = D // pack_factor
     else:

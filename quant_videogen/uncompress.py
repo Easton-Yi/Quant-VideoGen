@@ -1,6 +1,6 @@
 """
-Uncompress and dequantize for triton-xxx quant types (triton-nstages-kmeans-int2/int4).
-Mirrors the structure of compress.py: get_dequantize_fn + uncompress_kv_cache.
+Uncompress and dequantize for triton-xxx quant types
+(triton-nstages-kmeans-int1/int2/int4).
 """
 
 import re
@@ -35,11 +35,9 @@ def uncompress_kv_cache(
     Args:
         k: Cached K for this layer (tensor for non-triton, packed_state dict for triton-xxx).
         v: Cached V for this layer (tensor for non-triton, packed_state dict for triton-xxx).
-        quant_type: Same quant_type used when compressing.
-        quant_config: Same config used when compressing.
-        dequantize_fn: From get_dequantize_fn(quant_type, quant_config).
-        device: If set, move packed state to this device before dequantizing.
-        output_dtype: Dtype for reconstructed K/V tensors.
+        The packed cache dict must contain ``info.quant_config`` and
+        ``info.output_dtype``. This lets mixed-bit cache spans dequantize
+        with the same quantization type used when each span was compressed.
 
     Returns:
         (k_tensor, v_tensor) for this layer, ready for attention.
