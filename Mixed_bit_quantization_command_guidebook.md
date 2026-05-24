@@ -1,4 +1,48 @@
-在环境和模型都已配置完成的前提下，下面是 Self-Forcing 实验的完整执行手册：
+## -1) 环境与模型准备
+
+若第一次在这台机器跑 Self-Forcing，先完成如下步骤：
+
+### -1.1 进入项目目录
+
+```bash
+cd Quant-VideoGen
+```
+
+### -1.2 安装 Self-Forcing 依赖（若尚未安装）
+
+```bash
+uv pip install -e ".[selfforcing]"
+```
+
+### -1.3 配置 Hugging Face 访问（若尚未登录）
+
+```bash
+hf auth login
+```
+
+### -1.4 下载 Self-Forcing 模型与 checkpoint
+
+```bash
+bash scripts/Self-Forcing/download_models.sh
+```
+
+该脚本会下载：
+
+- `ckpts/Self-Forcing/Wan2.1-T2V-1.3B`
+- `ckpts/Self-Forcing/self_forcing_dmd.pt`
+
+### -1.5 下载完成后快速校验
+
+```bash
+ls -l ckpts/Self-Forcing/self_forcing_dmd.pt
+ls -ld ckpts/Self-Forcing/Wan2.1-T2V-1.3B
+```
+
+如果这两个路径存在，后续即可直接跑，不需要每次重复下载。
+
+---
+
+在环境和模型都已配置完成后，下面是 Self-Forcing 实验的完整执行手册：
 
 - 先跑 BF16 baseline。
 - 再跑 4 组 mixed-bit：
